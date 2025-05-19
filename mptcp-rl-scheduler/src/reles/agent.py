@@ -66,9 +66,10 @@ class Online_Agent(threading.Thread):
                     action = self.agent.select_action(state, self.ounoise)
                 else:
                     action = self.agent.select_action(state)
+                action = [[0.0, 0.0]]
                 end = time.time()
                 print(
-                    f"[Online Agent] Chosen split action = {action.tolist()}"
+                    f"[Online Agent] Chosen split action = {action}"
                 )
                 print(
                     f"[Online Agent] Action compute time = {end-start:.4f}s"
