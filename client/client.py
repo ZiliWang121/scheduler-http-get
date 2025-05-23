@@ -1,104 +1,126 @@
 #!/usr/bin/python3
 
-import socket
-import sys 
-import getopt
-import mpsched
-from configparser import ConfigParser
+import sys
+import os
+from os import path
 import time
-import matplotlib.pyplot as plt
+import threading
+import pickle
+from threading import Event
+import socketserver
 import numpy as np
-import pandas as pd
-import re
-import random
-import sqlite3
+import socket
+import mpsched
+import torch
+from configparser import ConfigParser
+from replay_memory import ReplayMemory
+from agent import Online_Agent, Offline_Agent
+from naf_lstm import NAF_LSTM
+from gym import spaces
+import http.server
+import multiprocessing
+from datetime import datetime
+import shutil
+
+#structure and modulisation based on github.com/gaogogo/Experiment
+
+
+class MyHTTPHandler(http.server.SimpleHTTPRequestHandler):
+    """SimpleHTTPRequestHandler with overwritten do_GET function to give information about start of file transfer
+    and the socket fd to the online agent 
+    """
+    def do_GET(self):
+
+        sock= self.request
+        agent = Online_Agent(fd=sock.fileno(),cfg=self.server.cfg,memory=self.server.replay_memory,event=self.server.event)
+        agent.start()
+        self.server.event.set()
+        f = self.send_head()
+        if f:
+            try:
+                self.copyfile(f,self.wfile)
+            finally:
+                f.close()
+                self.server.event.clear()
+
+class ThreadedHTTPServer(socketserver.ThreadingMixIn,http.server.HTTPServer):
+    """ThreadedHTTPServer class initialized with (IP,PORT),HTTPRequestHandler
+    """
+    pass
 
 def main(argv):
-	cfg = ConfigParser()
-	cfg.read('config.ini')
-	IP = cfg.get('server','ip')
-	PORT = cfg.getint('server','port')
-	FILE = cfg.get('file','file')
-	FILES = ["64kb.dat","2mb.dat","8mb.dat","64mb.dat"]
-	num_iterations = 150
-	if len(argv) != 0:
-		FILE = argv[1]
-		num_iterations = int(argv[0])
-	print(FILE,num_iterations)
-	performance_metrics = []
-	np.random.seed(42)
-	for l in range(num_iterations):
-		ooq = [0,0,0]
-		if FILE == "random" and num_iterations > 150: #random.dat
-			FILE2 = np.random.choice(FILES,p=[0, 0.9, 0, 0.1])
-		elif FILE == "random" and num_iterations == 150:
-			FILE2 = np.random.choice(FILES,p=[0.3,0.35,0.3,0.05])
-		else:
-			FILE2 = FILE
-		
-		print(FILE2)
-		sock = socket.socket(socket.AF_INET,socket.SOCK_STREAM)
-		
-		sock.connect((IP,PORT))
-		sock.send(b"GET /" + bytes(FILE2,"utf8") + b" HTTP/1.1\r\nHost:10.0.2.10\r\n\r\n")
-		try:
-			info = sock.recv(17)
-		except TimeoutError:
-			print("timeout error")
-		
-		fd = sock.fileno()
-		mpsched.persist_state(fd)
-		
-		if str(info,encoding='utf8').find("OK") != -1:
-			
-			fp = open(FILE2,'wb')
-			if not fp:
-				print("open file error.\n")
-			else:
-				start = time.time()
-				while(True):
-					subs = (mpsched.get_sub_info(fd))
-					buff = sock.recv(2048)
-					if not buff:
-						break
-					else:	
-						fp.write(buff)
-				fp.close()
-				stop = time.time() #completion time from start of TCP until end of transfer 
-				if l >= 30:
-					for i in range(len(subs)):
-						print(subs[i][8],subs[i][7])
-						if subs[i][8] == 16842762: #16842762 #3053496512 16777226 subflow 0 in user space
-							ooq[0] = subs[i][7]
-						elif subs[i][8] == 33685514: #2868947136 #33685514: #33554442
-							ooq[1] = subs[i][7]
-						elif subs[i][8] == 50528266:
-							ooq[2] = subs[i][7]
-						else:
-							ooq[i] = 0
-					completion_time = stop-start
-					print(completion_time)
-					if FILE2.find("kb") != -1:
-						file_size = int(re.findall(r'\d+',FILE2)[0])/1000
-					else: 
-						file_size = int(re.findall(r'\d+',FILE2)[0]) 
-					print(file_size)
-					throughput = file_size/completion_time
-					performance_metrics.append({"completion time": completion_time,
-									"throughput": throughput,
-									"out-of-order 4G": ooq[0],
-									"out-of-order 5G": ooq[1],
-									"out-of-order WLAN": ooq[2]})
-				
-				
-		else:
-			print('no file {} in server: {}'.format(FILE2,IP))
-		sock.close()
-		time.sleep(0.25)
-	df = pd.DataFrame(performance_metrics)
-	df.to_csv("client_metrics.csv",index=False)
-	print("finish transfer")
-		
-		
+    cfg = ConfigParser()
+    cfg.read('config.ini')
+    IP = cfg.get('server','ip')
+    PORT = cfg.getint('server','port')
+    MEMORY_FILE = cfg.get('replaymemory','memory')
+    AGENT_FILE = cfg.get('nafcnn','agent')
+    INTERVAL = cfg.getint('train','interval')
+    EPISODE = cfg.getint('train','episode')
+    BATCH_SIZE = cfg.getint('train','batch_size')
+    MAX_NUM_FLOWS = cfg.getint("env",'max_num_subflows')
+    transfer_event = Event()
+    CONTINUE_TRAIN = 1
+
+    if len(argv) != 0:
+        CONTINUE_TRAIN = int(argv[0])
+        now = datetime.now().replace(microsecond=0)
+        start_train = now.strftime("%Y-%m-%d %H:%M:%S")
+        scenario = argv[1]
+    #print(argv)
+    print(f"[Server] Starting with args CONTINUE_TRAIN={CONTINUE_TRAIN}, scenario='{scenario}'")
+    if os.path.exists(MEMORY_FILE) and CONTINUE_TRAIN:
+        with open(MEMORY_FILE,'rb') as f:
+            try:
+                memory = pickle.load(f)
+                f.close()
+            except EOFError:
+                print("memory EOF error not saved properly")
+                memory = ReplayMemory(cfg.getint('replaymemory','capacity'))
+    else:
+        memory = ReplayMemory(cfg.getint('replaymemory','capacity'))
+
+    if CONTINUE_TRAIN != 1 and os.path.exists(AGENT_FILE):
+        os.makedirs("trained_models/",exist_ok=True)
+        shutil.move(AGENT_FILE,"trained_models/agent"+start_train+".pkl")
+    if not os.path.exists(AGENT_FILE) or CONTINUE_TRAIN != 1:
+        agent = NAF_LSTM(gamma=cfg.getfloat('nafcnn','gamma'),tau=cfg.getfloat('nafcnn','tau'),
+        hidden_size=cfg.getint('nafcnn','hidden_size'),num_inputs=cfg.getint('env','k')*MAX_NUM_FLOWS*5,
+        action_space=MAX_NUM_FLOWS) #5 is the size of state space (TP,RTT,CWND,unACK,retrans)
+        torch.save(agent,AGENT_FILE)
+
+    off_agent = Offline_Agent(cfg=cfg,model=AGENT_FILE,memory=memory,event=transfer_event)
+    off_agent.daemon = True
+    server = ThreadedHTTPServer((IP,PORT),MyHTTPHandler)
+    server.event = transfer_event
+    server.cfg = cfg
+    server.replay_memory = memory
+    server_thread = threading.Thread(target=server.serve_forever)
+    server_thread.daemon = True
+    server_thread.start()
+
+    try:
+        while(transfer_event.wait(timeout=60)): #only returns false in case of timeout
+            if len(memory) > BATCH_SIZE and not off_agent.is_alive():
+                off_agent.start() 
+            time.sleep(25)
+            pass
+        with open(MEMORY_FILE,'wb') as f:
+            pickle.dump(memory,f)
+            f.close()
+    except (KeyboardInterrupt,SystemExit):
+        with open(MEMORY_FILE,'wb') as f:
+            pickle.dump(memory,f)
+            f.close()
+
 if __name__ == '__main__':
-	main(sys.argv[1:])
+    main(sys.argv[1:])
+    
+    
+    
+    
+    
+    
+    
+        
+        
