@@ -77,7 +77,7 @@ static PyObject* set_seg(PyObject* self,PyObject* args)
 	struct mptcp_sched_info sched_info;
 	sched_info.len = length-1;
 	unsigned char quota[NUM_SUBFLOWS] = {0};
-	unsigned char segments[NUM_SUBFLOWS];
+	unsigned char segments[NUM_SUBFLOWS] = {0};
 	
 	sched_info.quota = &quota;
 	sched_info.num_segments = &segments;

@@ -128,10 +128,8 @@ static struct sock *reles_get_available_subflow(struct sock *meta_sk,
 		tp = tcp_sk(sk);
 		msp = mysched_get_priv(tp);
 		
-		current_space = msp->num_segments - msp->quota;
-		
 		//if num_segments == 0 we dont want to use the subflow at all even if it is available
-		if(msp->num_segments ==0){
+		if(msp->weight == 0){
 			continue;
 		}
 		
@@ -248,7 +246,7 @@ retry:
 		}
 		
 		/* Or, it must then be fully used  */
-		if (msp->quota >= msp->num_segments)
+		if (msp->quota_byte >= msp->weight)
 			full_subs++;
 	}
 
