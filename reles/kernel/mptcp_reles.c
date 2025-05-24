@@ -108,7 +108,6 @@ static struct sock *reles_get_available_subflow(struct sock *meta_sk,
 	const struct mptcp_cb *mpcb = tcp_sk(meta_sk)->mpcb;
 	struct sock *sk = NULL, *bestsk = NULL, *backupsk = NULL;
 	struct mptcp_tcp_sock *mptcp;
-	unsigned int current_space = 0;
 	
 	/* Answer data_fin on same subflow!!! */
 	if (meta_sk->sk_shutdown & RCV_SHUTDOWN &&
@@ -227,7 +226,7 @@ retry:
 		if (!mptcp_reles_is_available(sk_it, skb, false, cwnd_limited))
 			continue;
 		//skip subfows with num_segments = 0	
-		if(msp->num_segments == 0){
+		if(msp->weight == 0){
 			if (msp->weight == 0)
 				continue;
 		}	
