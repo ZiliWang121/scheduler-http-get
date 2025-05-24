@@ -12,9 +12,8 @@ module_param(cwnd_limited, bool, 0644);
 MODULE_PARM_DESC(cwnd_limited, "if set to 1, the scheduler tries to fill the congestion-window on all subflows");
 
 struct mysched_priv{
-  unsigned char quota;
-  /* The number of consecutive segments that are part of a burst */
-  unsigned char num_segments;
+  __u16 quota_byte;   /* 已发送字节数 (≤ weight)        */
+  __u16 weight;       /* 目标配额，0‥100 × MSS          */
 };
 
 static struct mysched_priv *mysched_get_priv(const struct tcp_sock *tp)
@@ -231,16 +230,17 @@ retry:
 			continue;
 		//skip subfows with num_segments = 0	
 		if(msp->num_segments == 0){
-			continue;
+			if (msp->weight == 0)
+				continue;
 		}	
 
 		iter++;
 		
 		
 		/* Is this subflow currently being used? */
-		if ((msp->quota >= 0) && (msp->quota < msp->num_segments) &&
-      (msp->num_segments - msp->quota > split)) {
-			split = msp->num_segments - msp->quota;
+		if (msp->weight && (msp->quota_byte < msp->weight) &&
+      (msp->weight - msp->quota_byte > split)) {
+			split = msp->weight - msp->quota_byte;   /* 剩余配额(字节) */
 			if(max_space < split){
 				choose_sk = sk_it; 
 				max_space = split;
@@ -269,7 +269,7 @@ retry:
 
 			if (!mptcp_reles_is_available(sk_it, skb, false, cwnd_limited))
 				continue;
-			msp->quota = 0;
+			msp->quota_byte = 0;
 			
 		}
 
@@ -290,12 +290,9 @@ found:
 		
 		*subsk = choose_sk;
 		mss_now = tcp_current_mss(*subsk);
-		*limit = split * mss_now;
-
-		if (skb->len > mss_now)
-			msp->quota += DIV_ROUND_UP(skb->len, mss_now);
-		else
-			msp->quota++;
+		
+		*limit = min_t(u32, split, mss_now); /* 一次 ≤ 剩余配额 */
+        msp->quota_byte += skb->len;         /* 按字节记账 */
 
 		return skb;
 	}
@@ -307,7 +304,8 @@ found:
 static void relessched_init(struct sock *sk)
 {
   struct mysched_priv* priv = mysched_get_priv(tcp_sk(sk));
-  priv->num_segments = num_segments;
+  priv->weight      = num_segments; /* 初始=模块参数 */
+  priv->quota_byte  = 0;
 }
 
 static struct mptcp_sched_ops mptcp_sched_reles = {

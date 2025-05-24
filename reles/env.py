@@ -147,10 +147,10 @@ class Env():
         A = [self.fd]
         
         for k in range(self.max_num_flows):
-            kaction = (action[0][k]+1)/2 #high = 10 low = 1
-            kaction *= self.num_segments-1
-            kaction += 1
-            splits.append(int(np.round(kaction)))
+            ratio   = max(0.0, (action[0][k]+1)/2)   # 连续 0‥1
+            SCALE   = 100                           # 精度 1 %
+            weight  = int(round(ratio * SCALE))     # 0‥100
+            splits.append(weight)
         A = list(np.concatenate((A,splits)))
         print(f"[Env.step] Applied splits = {splits}")
         
